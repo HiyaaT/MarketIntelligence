@@ -66,7 +66,7 @@ def create_app():
     api.add_resource(PriceChartAPI, "/chart/price")
     api.add_resource(VolumeChartAPI, "/chart/volume")
     api.add_resource(DMAChartAPI,'/chart/dma')
-    api.add_resource(CandlestickResource, '/chart/candlestick')
+    api.add_resource(CandleData, "/chart/candle/<string:symbol>")
     #/api/v1/chart/price
     #/api/v1/chart/volume
     
