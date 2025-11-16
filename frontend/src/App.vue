@@ -4,6 +4,7 @@ import { useRouter, RouterLink, RouterView } from 'vue-router';
 import axios from 'axios';
 import { useMessageStore } from './stores/message_store';
 import { useAuthStore } from './stores/auth_store';
+import FloatingChatWidget from './components/FloatingChatWidget.vue';
 
 const messageStore = useMessageStore();
 const authStore = useAuthStore();
@@ -80,6 +81,9 @@ axios.interceptors.response.use(
     <main class="content">
       <RouterView />
     </main>
+
+    <!-- Floating Chatbot Widget -->
+    <FloatingChatWidget />
   </div>
 </template>
 

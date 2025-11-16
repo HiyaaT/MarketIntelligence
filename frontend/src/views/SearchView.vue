@@ -3,7 +3,6 @@ import { ref, computed } from "vue";
 import { useAuthStore } from "@/stores/auth_store";
 import { useMessageStore } from "@/stores/message_store";
 import { useRouter } from "vue-router";
-import { DotLottieVue } from '@lottiefiles/dotlottie-vue';
 
 
 // --- 1. CHART.JS IMPORTS ---
@@ -38,12 +37,16 @@ const messageStore = useMessageStore();
 const router = useRouter();
 
 const backendURL = computed(() => authStore.getBackendServerURL());
-const token = computed(() => authStore.getToken());
 const userId = computed(() => authStore.getUserId());
 
 function getAuthHeaders() {
   const headers = { "Content-Type": "application/json" };
-  if (token.value) headers["Authorization"] = `Bearer ${token.value}`;
+  const authToken = sessionStorage.getItem('auth_token');
+  if (authToken) {
+    headers["Authorization"] = authToken; // Try without "Bearer"
+    headers["X-Auth-Token"] = authToken; // Also try custom header
+  }
+  console.log('DEBUG getAuthHeaders:', headers);
   return headers;
 }
 
@@ -268,6 +271,7 @@ async function analyzeTicker() {
 }
 
 // --- ADD TO WATCHLIST (Unchanged) ---
+// --- ADD TO WATCHLIST (Unchanged) ---
 async function addToWatchlist(ticker) {
   if (!userId.value) {
     messageStore.setFlashMessage("Please log in to save watchlist.");
@@ -304,6 +308,7 @@ async function addToWatchlist(ticker) {
     messageStore.setFlashMessage(err.message || "Failed to add to watchlist.");
   }
 }
+
 
 // --- Prediction Modal (Unchanged) ---
 async function predictFuturePrice(ticker) {
@@ -361,13 +366,30 @@ function openPortfolioModal() {
 function saveToPortfolio() {
   if (!userId.value) return;
 
-  // --- INTEGRATION POINT: Add API call logic here later ---
-  console.log("Saving to portfolio:", portfolioTransaction.value);
-  messageStore.setFlashMessage(`Transaction saved for ${portfolioTransaction.value.ticker}. (Integration needed)`);
+  const url = `${backendURL.value}/api/v1/portfolio/add`;
   
-  showPortfolioModal.value = false;
-  // Reset fields after successful (or attempted) save
-  portfolioTransaction.value = { ticker: '', company_name: '', price: 0, quantity: 1, purchase_date: new Date().toISOString().substring(0, 10) };
+  fetch(url, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: JSON.stringify({
+      user_id: userId.value,
+      symbol: portfolioTransaction.value.ticker,
+      quantity: portfolioTransaction.value.quantity,
+      purchase_price: parseFloat(portfolioTransaction.value.price),
+      purchase_date: portfolioTransaction.value.purchase_date,
+      notes: portfolioTransaction.value.company_name
+    })
+  })
+  .then(res => res.json())
+  .then(() => {
+    messageStore.setFlashMessage(`${portfolioTransaction.value.ticker} added to portfolio successfully!`);
+    showPortfolioModal.value = false;
+    portfolioTransaction.value = { ticker: '', company_name: '', price: 0, quantity: 1, purchase_date: new Date().toISOString().substring(0, 10) };
+  })
+  .catch(err => {
+    messageStore.setFlashMessage(`Failed to add to portfolio: ${err.message}`);
+  });
+
 }
 
 
@@ -419,7 +441,7 @@ const shortSummary = computed(() => {
   }
   const summary = analysisResults.value.summary;
   //CRITICAL CHANGE: Set a new, smaller character limit (e.g., 80 characters)
-  const maxLength = 250; 
+  const maxLength = 80; 
 
   if (summary.length <= maxLength) {
     return summary;
@@ -457,14 +479,7 @@ if (userId.value) fetchWatchlist();
       </button>
     </form>
 
-    <div v-if="loading" class="loading-overlay">
-      <DotLottieVue 
-        class="loading-lottie"
-        autoplay 
-        loop 
-        src="https://lottie.host/6a2fef57-7f00-448d-bb75-51f8c57338b2/47X789mg0j.lottie" 
-      />
-    </div>
+    <div v-if="loading" class="loading">Loading...</div>
     <div v-else-if="error" class="error">{{ error }}</div>
 
     <div v-else-if="analysisResults" class="analysis-card">
@@ -523,7 +538,7 @@ if (userId.value) fetchWatchlist();
         
         <div class="charts-column">
           <div v-if="dmaChartData" class="chart-box">
-            <h4>Moving Averages (Price, 50 DMA, 20 DMA)</h4>
+            <h4>Moving Averages (Price, 50 DMA, 200 DMA)</h4>
             <div class="chart-container">
                 <Line :data="dmaChartData" :options="chartOptions" />
             </div>
@@ -766,10 +781,14 @@ if (userId.value) fetchWatchlist();
   border-radius: 0.5rem;
 }
 .btn-search {
-  background-color: #3b82f6;
-  color: white;
-  padding: 0.6rem 1rem;
-  border-radius: 0.5rem;
+  background-color: #0f0a0a;
+  color: #edf5f2; /* Green */
+    border-radius: 0.3rem;
+    padding: 0.5rem 0.8rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+    white-space: nowrap;
 }
 
 /* Button Group Styling */
@@ -779,21 +798,39 @@ if (userId.value) fetchWatchlist();
     gap: 0.5rem;
     margin-top: 1rem;
 }
-.btn-add, .btn-predict, .btn-portfolio {
-    padding: 0.6rem;
-    border-radius: 0.5rem;
-    color: white;
-    font-weight: 500;
-    text-align: center;
-}
+
 .btn-add {
-    background-color: #10b981; /* Green */
+    color: #1c4587;
+  background-color: #e6f0ff;
+  border: none;
+  border-radius: 0.3rem;
+  padding: 0.5rem 0.8rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+  white-space: nowrap;
 }
 .btn-predict {
-    background-color: #f59e0b; /* Amber */
+    color: #103571;
+  background-color: #e6f0ff;
+  border: none;
+  border-radius: 0.3rem;
+  padding: 0.5rem 0.8rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+  white-space: nowrap;
 }
 .btn-portfolio {
-    background-color: #8b5cf6; /* Violet */
+    color: #1a458a;
+  background-color: #e6f0ff;
+  border: none;
+  border-radius: 0.3rem;
+  padding: 0.5rem 0.8rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+  white-space: nowrap;
 }
 
 /* Modal Styling */
@@ -815,18 +852,26 @@ if (userId.value) fetchWatchlist();
   box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
 }
 .btn-close {
-    background: #ef4444; /* Red */
-    color: white;
-    padding: 0.6rem 1rem;
-    border-radius: 0.5rem;
-    margin-top: 0.5rem;
+  color: #3b82f6;
+  background-color: #e04815;
+  border: none;
+  border-radius: 0.3rem;
+  padding: 0.5rem 0.8rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+  white-space: nowrap;
 }
 .btn-save {
-    background: #3b82f6; /* Blue */
-    color: white;
-    padding: 0.6rem 1rem;
-    border-radius: 0.5rem;
-    margin-right: 0.5rem;
+   color: #3b82f6;
+  background-color: #e6f0ff;
+  border: none;
+  border-radius: 0.3rem;
+  padding: 0.5rem 0.8rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+  white-space: nowrap;
 }
 /* Portfolio Form Specific Styling */
 .portfolio-form {
@@ -854,5 +899,6 @@ if (userId.value) fetchWatchlist();
     justify-content: flex-end;
     gap: 0.5rem;
     margin-top: 1rem;
+    transition: background-color 0.2s ease;
 }
 </style>

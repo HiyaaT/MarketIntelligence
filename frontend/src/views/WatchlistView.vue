@@ -1,8 +1,16 @@
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, nextTick } from 'vue'
 import { useAuthStore } from '@/stores/auth_store'
 import { useMessageStore } from '@/stores/message_store'
+import axios from 'axios'
 
+// --- Chart.js imports ---
+import { Chart, registerables } from 'chart.js'
+import 'chartjs-adapter-date-fns' // CRITICAL: For time scale support
+import { CandlestickController, CandlestickElement } from 'chartjs-chart-financial'
+
+// Register all necessary components
+Chart.register(...registerables, CandlestickController, CandlestickElement)
 
 // --- Initialize Stores ---
 const authStore = useAuthStore()
@@ -19,23 +27,27 @@ const monteCarloData = ref(null)
 const monteLoading = ref(false)
 const monteError = ref(null)
 
-// NEW: Technical Signal modal state
+// Technical Signal modal state
 const showSignalModal = ref(false)
-const signalData = ref(null) // Corrected initialization
+const signalData = ref(null)
 const signalLoading = ref(false)
 const signalError = ref(null)
+
+// Chart Modal state
+const showChartModal = ref(false)
+// Initialized as an array for safe use with .length in template
+const chartData = ref([]) 
+const chartLoading = ref(false)
+const chartError = ref(null)
+const chartSymbol = ref('')
+const candleChart = ref(null) // Template ref for the canvas
+let chartInstance = null // To hold the chart instance for destruction
 
 // --- Computed Properties ---
 const backendURL = computed(() => authStore.getBackendServerURL())
 const token = computed(() => authStore.getToken())
 const userId = computed(() => authStore.getUserId())
 
-/**
- * Converts the complex signal string (e.g., "Neutral to Bullish")
- * into a valid CSS class name (e.g., "neutral-to-bullish").
- * @param {string} signal The signal string from the API.
- * @returns {string} The CSS class name.
- */
 const signalClass = computed(() => {
   if (!signalData.value || !signalData.value.signal) return ''
   return signalData.value.signal.toLowerCase().replace(/\s/g, '-').replace(/\(|\)/g, '')
@@ -61,10 +73,9 @@ async function fetchWatchlist() {
     if (!res.ok) throw new Error('Failed to fetch watchlist')
 
     const data = await res.json()
-    // Ensure price is treated as a number for .toFixed() in template
     watchlist.value = (data.watchlist || []).map(item => ({
         ...item,
-        price: Number(item.price) // Ensure price is number
+        price: Number(item.price)
     }))
   } catch (err) {
     watchlistError.value = err.message
@@ -89,7 +100,7 @@ async function deleteFromWatchlist(id, ticker) {
   }
 }
 
-// --- Monte Carlo Prediction ---
+// --- Monte Carlo Simulation ---
 async function predictMonteCarlo() {
   if (!watchlist.value.length) return
 
@@ -110,7 +121,6 @@ async function predictMonteCarlo() {
     const data = await res.json()
     if (!res.ok || data.error) throw new Error(data.error || 'Monte Carlo simulation failed')
 
-    // Map API keys to template-friendly keys
     monteCarloData.value = {
       stocks: data.stocks || stocks,
       expected_return: Number(data.expected_return_percent ?? 0),
@@ -125,15 +135,14 @@ async function predictMonteCarlo() {
   }
 }
 
-// --- NEW: Get Technical Signal ---
+// --- Technical Signal ---
 async function getTechnicalSignal(ticker) {
   signalLoading.value = true
   signalError.value = null
   signalData.value = null
-  showSignalModal.value = true // Show modal immediately
+  showSignalModal.value = true
 
   try {
-    // IMPORTANT: Path must match your Flask resource definition
     const url = `${backendURL.value}/api/v1/technical_signal?stock=${ticker}`
     const res = await fetch(url, { headers: getAuthHeaders() })
 
@@ -148,7 +157,274 @@ async function getTechnicalSignal(ticker) {
   }
 }
 
-// --- Watch userId changes ---
+// --- Fetch Candlestick Chart ---
+async function fetchChartData(symbol) {
+  chartSymbol.value = symbol
+  chartLoading.value = true
+  chartError.value = null
+  chartData.value = [] // Reset data
+  showChartModal.value = true // Open modal immediately
+
+  try {
+    const apiSymbol = symbol
+    const url = `${backendURL.value}/api/v1/chart/candle/${apiSymbol}`
+    
+    const res = await axios.get(url, {
+      headers: getAuthHeaders()
+    })
+
+    let responseData = res.data
+
+    // Your API returns: { symbol, count, data: [...] }
+    let rawData = responseData.data || responseData.chart_data || []
+
+    // Sort by date
+    rawData.sort((a, b) => new Date(a.Date) - new Date(b.Date))
+
+    chartData.value = rawData
+    
+    // Give the DOM extra time to render
+    await nextTick()
+    await nextTick()
+  
+    
+    // Force render after data is set
+    if (showChartModal.value) {
+      await renderChart()
+    }
+  
+    
+  } catch (err) {
+    console.error('=== CHART FETCH ERROR ===')
+    console.error('Error object:', err)
+    console.error('Error name:', err.name)
+    console.error('Error message:', err.message)
+    console.error('Error stack:', err.stack)
+    
+    if (err.response) {
+      console.error('Has response object')
+      console.error('Response status:', err.response.status)
+      console.error('Response statusText:', err.response.statusText)
+      console.error('Response data:', err.response.data)
+      console.error('Response headers:', err.response.headers)
+      chartError.value = err.response.data?.error || `Server error: ${err.response.status}`
+    } else if (err.request) {
+      console.error('Has request but no response')
+      console.error('Request:', err.request)
+      chartError.value = 'No response from server. Check network/CORS.'
+    } else {
+      console.error('Error during request setup:', err.message)
+      chartError.value = err.message || 'Failed to fetch chart data'
+    }
+    
+    chartData.value = []
+  } finally {
+    chartLoading.value = false
+    console.log('=== CHART FETCH COMPLETE ===')
+  }
+}
+
+// --- Core function to render the chart ---
+async function renderChart() {
+  // Wait a bit to ensure DOM is ready
+  await nextTick()
+  
+  if (!candleChart.value) {
+    console.error('Canvas element not found')
+    return
+  }
+  
+  if (!chartData.value || chartData.value.length === 0) {
+    console.error('No chart data available')
+    return
+  }
+  
+  const ctx = candleChart.value.getContext('2d')
+  if (chartInstance) {
+    chartInstance.destroy()
+    chartInstance = null
+  }
+
+  // Map OHLC data, ensuring conversion to Number
+  const ohlc = chartData.value.map(d => ({
+    x: new Date(d.Date).getTime(),
+    o: Number(d.Open), 
+    h: Number(d.High),
+    l: Number(d.Low),
+    c: Number(d.Close)
+  }))
+  
+  // Map SMA data - filter out null values
+  const sma5 = chartData.value
+    .filter(d => d.SMA5 !== null && d.SMA5 !== undefined)
+    .map(d => ({ x: new Date(d.Date).getTime(), y: Number(d.SMA5) }))
+  
+  const sma20 = chartData.value
+    .filter(d => d.SMA20 !== null && d.SMA20 !== undefined)
+    .map(d => ({ x: new Date(d.Date).getTime(), y: Number(d.SMA20) }))
+
+  chartInstance = new Chart(ctx, {
+    type: 'candlestick',
+    data: {
+      datasets: [
+        { 
+          label: `${chartSymbol.value} OHLC`, 
+          data: ohlc,
+          borderWidth: 1,
+          borderColor: function(context) {
+            const item = context.raw
+            return item.c >= item.o ? '#10b981' : '#ef4444'
+          },
+          backgroundColor: function(context) {
+            const item = context.raw
+            return item.c >= item.o ? 'rgba(16, 185, 129, 0.5)' : 'rgba(239, 68, 68, 0.5)'
+          }
+        },
+        // Line chart for SMA5
+        {
+          label: 'SMA5',
+          data: sma5,
+          type: 'line',
+          borderColor: '#3b82f6',
+          backgroundColor: 'rgba(59, 130, 246, 0.1)',
+          borderWidth: 2,
+          pointRadius: 0,
+          pointHoverRadius: 4,
+          tension: 0.1,
+          fill: false
+        },
+        // Line chart for SMA20
+        {
+          label: 'SMA20',
+          data: sma20,
+          type: 'line',
+          borderColor: '#f59e0b',
+          backgroundColor: 'rgba(245, 158, 11, 0.1)',
+          borderWidth: 2,
+          pointRadius: 0,
+          pointHoverRadius: 4,
+          tension: 0.1,
+          fill: false
+        }
+      ]
+    },
+    options: { 
+        responsive: true, 
+        maintainAspectRatio: false,
+        interaction: {
+          intersect: false,
+          mode: 'index'
+        },
+        plugins: { 
+            legend: { 
+                display: true, 
+                position: 'top',
+                labels: {
+                    usePointStyle: true,
+                    padding: 15,
+                    font: {
+                      size: 12
+                    }
+                }
+            },
+            tooltip: {
+              enabled: true,
+              callbacks: {
+                label: function(context) {
+                  const label = context.dataset.label || ''
+                  if (context.parsed.y !== undefined) {
+                    return `${label}: ₹${context.parsed.y.toFixed(2)}`
+                  }
+                  if (context.raw.o !== undefined) {
+                    return [
+                      `O: ₹${context.raw.o.toFixed(2)}`,
+                      `H: ₹${context.raw.h.toFixed(2)}`,
+                      `L: ₹${context.raw.l.toFixed(2)}`,
+                      `C: ₹${context.raw.c.toFixed(2)}`
+                    ]
+                  }
+                  return label
+                }
+              }
+            }
+        },
+        scales: {
+            y: {
+                beginAtZero: false,
+                title: {
+                    display: true,
+                    text: 'Price (₹)',
+                    font: {
+                      size: 12,
+                      weight: 'bold'
+                    }
+                },
+                ticks: {
+                  callback: function(value) {
+                    return '₹' + value.toFixed(0)
+                  }
+                },
+                grid: {
+                  color: 'rgba(0, 0, 0, 0.05)'
+                }
+            },
+            x: {
+                type: 'time',
+                time: {
+                    unit: 'day',
+                    tooltipFormat: 'MMM dd, yyyy',
+                    displayFormats: {
+                        day: 'MMM dd',
+                        week: 'MMM dd',
+                        month: 'MMM yyyy'
+                    }
+                },
+                title: {
+                    display: true,
+                    text: 'Date',
+                    font: {
+                      size: 12,
+                      weight: 'bold'
+                    }
+                },
+                grid: {
+                  color: 'rgba(0, 0, 0, 0.05)'
+                }
+            }
+        }
+    }
+  })
+  
+  console.log('Chart instance created:', chartInstance)
+}
+
+// --- Watchers for data loading and rendering ---
+
+// 1. Watch chartData: When data is loaded/updated, try to render if the modal is already visible.
+watch(chartData, async (newData) => {
+  if (newData.length > 0 && showChartModal.value) {
+    // Multiple nextTick calls to ensure DOM is fully ready
+    await nextTick()
+    await nextTick()
+    renderChart()
+  }
+})
+
+// 2. Watch showChartModal: When the modal opens, ensure data is ready and render.
+watch(showChartModal, async (isVisible) => {
+    if (isVisible && chartData.value.length > 0) {
+        // Multiple nextTick calls to ensure v-if renders completely
+        await nextTick()
+        await nextTick()
+        renderChart()
+    } else if (!isVisible && chartInstance) {
+        // Destroy the chart when modal closes to free memory
+        chartInstance.destroy()
+        chartInstance = null
+    }
+})
+
+// --- Watch userId to fetch watchlist ---
 watch(userId, (id) => {
   if (id) fetchWatchlist()
 }, { immediate: true })
@@ -158,15 +434,7 @@ watch(userId, (id) => {
   <div class="watchlist-view">
     <div class="header-section">
       <h2 class="title">Your Watchlist ({{ watchlist.length }} stocks)</h2>
-      <button
-        v-if="watchlist.length > 0"
-        @click="predictMonteCarlo"
-        class="run-monte-carlo-btn"
-      >
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-play-btn" viewBox="0 0 16 16">
-          <path d="M6.79 5.093A.5.5 0 0 0 6 5.5v5a.5.5 0 0 0 .79.407l3.5-2.5a.5.5 0 0 0 0-.814z"/>
-          <path d="M0 4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2zm15 0a1 1 0 0 0-1-1H2a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1z"/>
-        </svg>
+      <button v-if="watchlist.length" @click="predictMonteCarlo" class="run-monte-carlo-btn">
         Run Monte Carlo Simulation
       </button>
     </div>
@@ -177,7 +445,6 @@ watch(userId, (id) => {
 
     <ul v-else class="list">
       <li v-for="item in watchlist" :key="item.id" class="stock-item-card">
-        
         <div class="stock-info-main">
           <div class="ticker-and-change">
             <span class="ticker-name">{{ item.ticker }}</span>
@@ -195,39 +462,20 @@ watch(userId, (id) => {
         </div>
 
         <div class="stock-details">
-          <div class="detail-group">
-            <span class="label">Market Cap</span>
-            <span class="value">{{ item.market_cap }}</span>
-          </div>
-          <div class="detail-group">
-            <span class="label">Volume</span>
-            <span class="value">{{ item.volume }}</span>
-          </div>
-          <div class="detail-group">
-            <span class="label">P/E Ratio</span>
-            <span class="value">{{ item.pe_ratio }}</span>
-          </div>
+          <div class="detail-group"><span class="label">Market Cap</span><span class="value">{{ item.market_cap }}</span></div>
+          <div class="detail-group"><span class="label">Volume</span><span class="value">{{ item.volume }}</span></div>
+          <div class="detail-group"><span class="label">P/E Ratio</span><span class="value">{{ item.pe_ratio }}</span></div>
         </div>
 
         <div class="actions">
-          <button @click="getTechnicalSignal(item.ticker)" class="btn-action bullish-bearish">
-            Bullish/Bearish
-          </button>
-          <button @click="deleteFromWatchlist(item.id, item.ticker)" class="btn-delete">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-trash" viewBox="0 0 16 16">
-              <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z"/>
-              <path d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H3a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1h1.5a1 1 0 0 1 1 1zM2.5 3h11V2h-11z"/>
-            </svg>
-          </button>
+          <button @click="getTechnicalSignal(item.ticker)" class="btn-action bullish-bearish">Bullish/Bearish</button>
+          <button @click="fetchChartData(item.ticker)" class="btn-action chart-btn">View Chart</button>
+          <button @click="deleteFromWatchlist(item.id, item.ticker)" class="btn-delete">🗑</button>
         </div>
       </li>
     </ul>
 
-    <div
-      v-if="showMonteCarloModal"
-      class="modal-backdrop"
-      @click.self="showMonteCarloModal = false"
-    >
+    <div v-if="showMonteCarloModal" class="modal-backdrop" @click.self="showMonteCarloModal = false">
       <div class="modal-content">
         <h3>Monte Carlo Portfolio Simulation</h3>
         <div v-if="monteLoading">Simulating...</div>
@@ -243,11 +491,7 @@ watch(userId, (id) => {
       </div>
     </div>
 
-    <div
-      v-if="showSignalModal"
-      class="modal-backdrop"
-      @click.self="showSignalModal = false"
-    >
+    <div v-if="showSignalModal" class="modal-backdrop" @click.self="showSignalModal = false">
       <div class="modal-content signal-modal">
         <h3>Technical Signal Analysis</h3>
         <div v-if="signalLoading">Analyzing Stock Data...</div>
@@ -257,26 +501,42 @@ watch(userId, (id) => {
           <p><strong>Price:</strong> ₹{{ signalData.current_price.toFixed(2) }}</p>
           <div :class="['signal-box', signalClass]">
             <strong>Signal: {{ signalData.signal }}</strong>
-            <p class="action-text">
-              **{{ signalData.suggested_action }}**
-            </p>
+            <p class="action-text">{{ signalData.suggested_action }}</p>
           </div>
           <p class="commentary">{{ signalData.commentary }}</p>
         </div>
         <button @click="showSignalModal = false" class="btn-close">Close</button>
       </div>
     </div>
+
+    <div v-if="showChartModal" class="modal-backdrop" @click.self="showChartModal = false">
+      <div class="modal-content chart-modal">
+        <h3>{{ chartSymbol }} - Candlestick Chart</h3>
+        
+        <div v-if="chartLoading" class="chart-loading">Loading chart...</div>
+        <div v-else-if="chartError" class="error">{{ chartError }}</div>
+        <div v-else-if="chartData.length === 0" class="chart-empty">No chart data available.</div>
+        
+        <!-- Always render canvas when not loading/error, use v-show for visibility -->
+        <div v-show="!chartLoading && !chartError && chartData.length > 0" class="chart-container">
+          <canvas ref="candleChart"></canvas>
+        </div>
+        
+        <button @click="showChartModal = false" class="btn-close">Close</button>
+      </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
-/* GENERAL LAYOUT AND HEADER */
+/* ================= GENERAL LAYOUT ================= */
 .watchlist-view {
-  font-family: sans-serif; 
-  background-color: #f7f8fc; 
+  font-family: 'Inter', sans-serif;
+  background-color: #f7f8fc;
   padding: 1.5rem;
 }
 
+/* --- Header Section --- */
 .header-section {
   display: flex;
   justify-content: space-between;
@@ -285,17 +545,18 @@ watch(userId, (id) => {
 }
 
 .title {
-  font-size: 1.25rem; 
-  font-weight: 600; 
+  font-size: 1.25rem;
+  font-weight: 600;
   color: #333;
   margin: 0;
 }
 
+/* Run Monte Carlo button */
 .run-monte-carlo-btn {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  background-color: #8a48f7; /* Purple */
+  background-color: #090410;
   color: white;
   border: none;
   border-radius: 0.5rem;
@@ -306,37 +567,49 @@ watch(userId, (id) => {
 }
 
 .run-monte-carlo-btn:hover {
-  background-color: #7234d7;
+  background-color: #07040c;
 }
 
 .run-monte-carlo-btn svg {
   fill: currentColor;
 }
 
+/* --- Empty/Error/Loading States --- */
+.empty {
+  text-align: center;
+  padding: 2rem;
+  background-color: #fff;
+  border-radius: 0.75rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  color: #555;
+}
+
+.error {
+  color: #ef4444;
+}
+
+/* ================= STOCK LIST CARD ================= */
 .list {
   list-style: none;
   padding: 0;
   margin: 0;
   display: flex;
-  flex-direction: column; 
+  flex-direction: column;
   gap: 1rem;
 }
 
-/* STOCK CARD STYLING */
 .stock-item-card {
   background: white;
   border-radius: 0.75rem;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
   padding: 1.2rem 1.5rem;
-  
-  /* Use CSS Grid for the card layout */
-  display: grid; 
-  grid-template-columns: 1.2fr 2fr 1fr; /* Main Info | Details | Actions */
+  display: grid;
+  grid-template-columns: 1.2fr 2fr 1fr; /* Main | Details | Actions */
   align-items: center;
-  gap: 1.5rem; 
+  gap: 1.5rem;
 }
 
-/* LEFT SECTION: Ticker, Name, Price */
+/* --- Left Section: Ticker, Company, Price --- */
 .stock-info-main {
   display: flex;
   flex-direction: column;
@@ -362,6 +635,18 @@ watch(userId, (id) => {
 
 .price-info {
   margin-top: 0.5rem;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.price-info .label {
+  font-weight: 500;
+  color: #a0aec0;
+}
+
+.price-info .value {
+  font-weight: 600;
+  color: #1a202c;
 }
 
 /* Price Change Chip */
@@ -377,16 +662,15 @@ watch(userId, (id) => {
 
 .percentage-change.positive {
   background-color: #e6ffed; /* Light green */
-  color: #276749; /* Darker green */
+  color: #276749; /* Dark green */
 }
 
 .percentage-change.negative {
   background-color: #fff0f0; /* Light red */
-  color: #9b2c2c; /* Darker red */
+  color: #9b2c2c; /* Dark red */
 }
 
-
-/* MIDDLE SECTION: Details Grid */
+/* ================= MIDDLE SECTION: DETAILS ================= */
 .stock-details {
   display: flex;
   justify-content: space-around;
@@ -399,19 +683,19 @@ watch(userId, (id) => {
   flex: 1;
 }
 
-.label {
+.detail-group .label {
   font-size: 0.8rem;
   color: #a0aec0;
   margin-bottom: 0.1rem;
 }
 
-.value {
+.detail-group .value {
   font-size: 0.95rem;
   font-weight: 500;
   color: #4a5568;
 }
 
-/* RIGHT SECTION: Actions */
+/* ================= RIGHT SECTION: ACTION BUTTONS ================= */
 .actions {
   display: flex;
   align-items: center;
@@ -420,8 +704,8 @@ watch(userId, (id) => {
 }
 
 .btn-action {
-  background-color: #e6f0ff; 
-  color: #3b82f6; 
+  color: #3b82f6;
+  background-color: #e6f0ff;
   border: none;
   border-radius: 0.3rem;
   padding: 0.5rem 0.8rem;
@@ -435,6 +719,11 @@ watch(userId, (id) => {
   background-color: #cce0ff;
 }
 
+.btn-action.chart-btn {
+  background-color: #f0f7ff;
+  color: #3b82f6;
+}
+
 .btn-delete {
   background: #fdf2f2;
   border: none;
@@ -446,18 +735,14 @@ watch(userId, (id) => {
   align-items: center;
   justify-content: center;
   cursor: pointer;
+  font-size: 1rem;
 }
 
 .btn-delete:hover {
   background-color: #ffe0e0;
 }
 
-.btn-delete svg {
-  fill: currentColor;
-}
-
-
-/* MODAL STYLES (Kept from original) */
+/* ================= MODAL STYLES ================= */
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -477,6 +762,36 @@ watch(userId, (id) => {
   box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
 }
 
+/* --- CHART MODAL --- */
+.chart-modal {
+  width: 90%;
+  max-width: 800px;
+  height: 85vh; 
+  display: flex;
+  flex-direction: column;
+}
+
+.chart-container {
+  flex-grow: 1;
+  position: relative;
+  min-height: 400px;
+}
+
+.chart-modal canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.chart-loading,
+.chart-empty {
+  flex-grow: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 400px;
+  color: #718096;
+}
+
 .btn-close {
   margin-top: 1rem;
   background: #ef4444;
@@ -487,21 +802,7 @@ watch(userId, (id) => {
   cursor: pointer;
 }
 
-.error {
-  color: #ef4444;
-}
-
-.empty {
-  text-align: center;
-  padding: 2rem;
-  background-color: #fff;
-  border-radius: 0.75rem;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
-  color: #555;
-}
-
-
-/* Signal Box Styles */
+/* ================= SIGNAL MODAL ================= */
 .signal-box {
   margin: 1rem 0;
   padding: 1rem;
@@ -510,20 +811,20 @@ watch(userId, (id) => {
 }
 
 .strong-bullish, .bullish-weak, .neutral-to-bullish {
-  background-color: #e6ffed; 
-  border: 1px solid #48bb78; 
+  background-color: #e6ffed;
+  border: 1px solid #48bb78;
   color: #276749;
 }
 
 .strong-bearish, .bearish-weak, .neutral-to-bearish {
-  background-color: #fff5f5; 
-  border: 1px solid #f56565; 
+  background-color: #fff5f5;
+  border: 1px solid #f56565;
   color: #9b2c2c;
 }
 
 .neutral {
-  background-color: #f7fafc; 
-  border: 1px solid #a0aec0; 
+  background-color: #f7fafc;
+  border: 1px solid #a0aec0;
   color: #4a5568;
 }
 
