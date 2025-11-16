@@ -18,7 +18,8 @@ from applications.portfolio_apis import *
 from applications.candle_stick import *
 
 from applications.Graphs_api import *
-
+from applications.ai_chatbot import *
+from applications.investment_goals import InvestmentGoalListResource, InvestmentGoalResource
 # Import API Resource classes
 from applications.auth_apis import *
 
@@ -37,8 +38,27 @@ def create_app():
     print("Flask-Restful Api initialized.")
 
     # 2. Initialize Flask-CORS AFTER Api, applying to the app
-    CORS(app, origins=["http://localhost:8080"], supports_credentials=True)
-    print("Flask-CORS initialized, allowing origin: http://localhost:8080")
+    CORS(app, resources={r"/api/*": {
+    "origins": [
+        "http://localhost:8080",
+        "http://localhost:3000",
+        "http://127.0.0.1:8080",
+        "http://127.0.0.1:5173"
+    ],
+    "supports_credentials": True,
+    "expose_headers": ["Content-Type", "Authorization"],
+    "allow_headers": [
+        "Content-Type",
+        "Authorization",
+        "Accept",
+        "Origin",
+        "X-Auth-Token",
+        "X-Requested-With",
+        "user-id"  # <-- Add your custom header here
+    ],
+    "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"]
+}})
+
     # --- End Adjustment ---
 
     # 3. Initialize Flask-Security (AFTER db.init_app)
@@ -70,8 +90,24 @@ def create_app():
     #/api/v1/chart/price
     #/api/v1/chart/volume
     
-    #protfolio apis
+     #protfolio apis
+    
+    api.add_resource(AddPortfolio, '/portfolio/add')  # POST to add stock
+    api.add_resource(PortfolioDashboard, '/portfolio/dashboard/<int:user_id>')  # GET dashboard with stats
+    api.add_resource(UpdatePortfolio, '/portfolio/update/<int:holding_id>')  # PUT to update holding
+    api.add_resource(DeletePortfolio, '/portfolio/<int:holding_id>')  # DELETE specific holding
+    api.add_resource(GetPortfolio, '/portfolio/<int:user_id>')  # GET user's holdings
+    
+    # Investment Goals APIs
+    api.add_resource(InvestmentGoalListResource, '/goals')  # GET all goals, POST new goal
+    api.add_resource(InvestmentGoalResource, '/goals/<int:goal_id>')  # GET, PUT, DELETE specific goal
+    
     #AI apis
+    
+    api.add_resource(AIChatbot, '/ai/chat')
+    api.add_resource(AIStockAnalyzer, '/ai/analyze-stock')
+    api.add_resource(AIPortfolioAdvisor, '/ai/portfolio-advice')
+    print("API resources registered under /api/v1 prefix.")
 
     print("API resources registered under /api/v1 prefix.")
 
